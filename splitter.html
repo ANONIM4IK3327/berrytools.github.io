@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auto Sticker Cutter + Downloader</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Подключаем библиотеку для создания ZIP архивов -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body {
+            background-color: #f3f4f6;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        #drop-zone.dragover {
+            border-color: #3b82f6;
+            background-color: #eff6ff;
+        }
+        .sticker-card {
+            transition: all 0.2s ease;
+        }
+        .sticker-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        }
+        /* Шахматный фон для прозрачных изображений */
+        .transparency-grid {
+            background-image: linear-gradient(45deg, #eee 25%, transparent 25%), 
+                              linear-gradient(-45deg, #eee 25%, transparent 25%), 
+                              linear-gradient(45deg, transparent 75%, #eee 75%), 
+                              linear-gradient(-45deg, transparent 75%, #eee 75%);
+            background-size: 10px 10px;
+            background-position: 0 0, 0 5px, 5px 5px, 5px 0;
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+    <div class="max-w-6xl mx-auto">
+        <header class="mb-8 text-center">
+            <h1 class="text-4xl font-black text-gray-900 mb-2">✂️ Sticker Slicer Pro</h1>
+            <p class="text-gray-600">Автоматическая нарезка атласа без сеток и рутины</p>
+        </header>
+
+        <!-- Зона загрузки -->
+        <div id="drop-zone" class="bg-white border-4 border-dashed border-gray-300 rounded-2xl p-12 text-center mb-8 cursor-pointer hover:border-blue-500 transition-all group">
+            <input type="file" id="file-input" class="hidden" accept="image/*">
+            <div class="space-y-4">
+                <div class="bg-blue-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto group-hover:scale-110 transition-transform">
+                    <svg class="h-10 w-10 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3 3m0 0l-3-3m3 3V10"></path>
+                    </svg>
+                </div>
+                <p class="text-xl text-gray-700 font-medium">Перетащите атлас сюда или кликните для выбора</p>
+                <p class="text-sm text-gray-400">Поддерживаются PNG, JPG, WebP</p>
+            </div>
+        </div>
+
+        <!-- Панель управления -->
+        <div class="bg-white p-6 rounded-2xl shadow-sm mb-8 flex flex-wrap gap-6 items-end justify-between">
+            <div class="flex flex-wrap gap-6">
+                <div class="flex flex-col">
+                    <label class="text-xs font-bold text-gray-500 uppercase mb-2">Чувствительность (Alpha)</label>
+                    <input type="range" id="threshold" min="1" max="255" value="15" class="w-48 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600">
+                </div>
+                <div class="flex flex-col">
+                    <label class="text-xs font-bold text-gray-500 uppercase mb-2">Мин. размер (пикс)</label>
+                    <input type="number" id="min-size" value="20" class="border-2 border-gray-100 rounded-lg px-3 py-1 w-24 focus:border-blue-500 outline-none transition-colors">
+                </div>
+            </div>
+            
+            <div class="flex gap-3">
+                <button id="process-btn" class="bg-blue-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors disabled:opacity-30" disabled>
+                    Нарезать
+                </button>
+                <button id="download-all-btn" class="hidden bg-emerald-500 text-white px-8 py-3 rounded-xl font-bold hover:bg-emerald-600 transition-colors flex items-center gap-2">
+                    <span>Скачать всё (.ZIP)</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Статус -->
+        <div id="status" class="hidden mb-6 p-4 rounded-xl bg-blue-50 text-blue-700 text-center font-medium animate-pulse"></div>
+
+        <!-- Сетка результатов -->
+        <div id="results-container" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-6">
+            <!-- Стикеры появятся тут -->
+        </div>
+
+        <canvas id="main-canvas" class="hidden"></canvas>
+    </div>
+
+    <script>
+        const fileInput = document.getElementById('file-input');
+        const dropZone = document.getElementById('drop-zone');
+        const processBtn = document.getElementById('process-btn');
+        const downloadAllBtn = document.getElementById('download-all-btn');
+        const resultsContainer = document.getElementById('results-container');
+        const statusDiv = document.getElementById('status');
+        const mainCanvas = document.getElementById('main-canvas');
+        const ctx = mainCanvas.getContext('2d', { willReadFrequently: true });
+
+        let originalImage = null;
+        let stickerBlobs = []; // Хранилище для ZIP
+
+        // Загрузка файлов
+        dropZone.onclick = () => fileInput.click();
+        fileInput.onchange = (e) => handleFile(e.target.files[0]);
+        dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add('dragover'); };
+        dropZone.ondragleave = () => dropZone.classList.remove('dragover');
+        dropZone.ondrop = (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            handleFile(e.dataTransfer.files[0]);
+        };
+
+        function handleFile(file) {
+            if (!file || !file.type.startsWith('image/')) return;
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const img = new Image();
+                img.onload = () => {
+                    originalImage = img;
+                    processBtn.disabled = false;
+                    statusDiv.innerHTML = `✅ Атлас загружен (${img.width}x${img.height})`;
+                    statusDiv.classList.remove('hidden');
+                    resultsContainer.innerHTML = '';
+                    downloadAllBtn.classList.add('hidden');
+                };
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        processBtn.onclick = () => {
+            if (!originalImage) return;
+            resultsContainer.innerHTML = '';
+            stickerBlobs = [];
+            statusDiv.textContent = '🔍 Ищу стикеры...';
+            statusDiv.classList.remove('hidden');
+            
+            // Даем UI обновиться
+            setTimeout(processImage, 50);
+        };
+
+        function processImage() {
+            const width = originalImage.width;
+            const height = originalImage.height;
+            mainCanvas.width = width;
+            mainCanvas.height = height;
+            ctx.drawImage(originalImage, 0, 0);
+
+            const imageData = ctx.getImageData(0, 0, width, height);
+            const data = imageData.data;
+            const threshold = parseInt(document.getElementById('threshold').value);
+            const minSize = parseInt(document.getElementById('min-size').value);
+            
+            const visited = new Uint8Array(width * height);
+            const foundStickers = [];
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const idx = (y * width + x);
+                    if (data[idx * 4 + 3] >= threshold && !visited[idx]) {
+                        const bounds = findBounds(x, y, width, height, data, visited, threshold);
+                        if (bounds.w >= minSize && bounds.h >= minSize) {
+                            foundStickers.push(bounds);
+                        }
+                    }
+                }
+            }
+
+            if (foundStickers.length === 0) {
+                statusDiv.textContent = '❌ Ничего не найдено. Попробуйте уменьшить чувствительность.';
+                return;
+            }
+
+            renderResults(foundStickers);
+            statusDiv.textContent = `🚀 Готово! Нарезано стикеров: ${foundStickers.length}`;
+            downloadAllBtn.classList.remove('hidden');
+        }
+
+        function findBounds(startX, startY, width, height, data, visited, threshold) {
+            let minX = startX, maxX = startX, minY = startY, maxY = startY;
+            const stack = [[startX, startY]];
+            visited[startY * width + startX] = 1;
+
+            while (stack.length > 0) {
+                const [x, y] = stack.pop();
+                minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+
+                const dirs = [[1,0], [-1,0], [0,1], [0,-1]];
+                for (const [dx, dy] of dirs) {
+                    const nx = x + dx, ny = y + dy;
+                    if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                        const nIdx = ny * width + nx;
+                        if (!visited[nIdx] && data[nIdx * 4 + 3] >= threshold) {
+                            visited[nIdx] = 1;
+                            stack.push([nx, ny]);
+                        }
+                    }
+                }
+            }
+            return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+        }
+
+        async function renderResults(stickers) {
+            for (let i = 0; i < stickers.length; i++) {
+                const s = stickers[i];
+                const canvas = document.createElement('canvas');
+                canvas.width = s.w;
+                canvas.height = s.h;
+                const sCtx = canvas.getContext('2d');
+                sCtx.drawImage(originalImage, s.x, s.y, s.w, s.h, 0, 0, s.w, s.h);
+
+                const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+                const url = URL.createObjectURL(blob);
+                stickerBlobs.push({ blob, name: `sticker_${i+1}.png` });
+
+                const card = document.createElement('div');
+                card.className = 'sticker-card bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex flex-col items-center';
+                card.innerHTML = `
+                    <div class="transparency-grid rounded-lg mb-3 w-full aspect-square flex items-center justify-center overflow-hidden">
+                        <img src="${url}" class="max-w-full max-h-full object-contain p-1">
+                    </div>
+                    <div class="text-[10px] text-gray-400 font-mono mb-2 uppercase">${s.w}x${s.h} px</div>
+                    <a href="${url}" download="sticker_${i+1}.png" class="w-full text-center bg-gray-50 hover:bg-blue-50 text-blue-600 py-2 rounded-lg text-sm font-bold transition-colors">
+                        Скачать
+                    </a>
+                `;
+                resultsContainer.appendChild(card);
+            }
+        }
+
+        downloadAllBtn.onclick = async () => {
+            if (stickerBlobs.length === 0) return;
+            
+            const originalText = downloadAllBtn.innerHTML;
+            downloadAllBtn.disabled = true;
+            downloadAllBtn.textContent = '⏳ Сжимаю...';
+
+            const zip = new JSZip();
+            stickerBlobs.forEach(item => {
+                zip.file(item.name, item.blob);
+            });
+
+            const content = await zip.generateAsync({ type: "blob" });
+            const zipUrl = URL.createObjectURL(content);
+            
+            const link = document.createElement('a');
+            link.href = zipUrl;
+            link.download = "stickers_pack.zip";
+            link.click();
+
+            downloadAllBtn.disabled = false;
+            downloadAllBtn.innerHTML = originalText;
+        };
+    </script>
+</body>
+</html>
